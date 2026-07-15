@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>On The Run - Remake</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color: transparent; }
+html,body { width:100%; height:100%; overflow:hidden; background:#111; font-family:'Segoe UI',Arial,sans-serif; user-select: none; }
+#gameCanvas { display:block; margin:0 auto; touch-action:manipulation; background: #222; }
+#ui { position:fixed; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index: 10; }
+.btn { pointer-events:auto; }
+
+.hud { position:absolute; top:16px; left:16px; color:#fff; font-size:18px; font-weight:800; text-shadow:2px 2px 0 #000; display:flex; gap:20px; }
+.score { color: #5cff5c; }
+.coins { color: #ffd700; }
+
+#menuScreen, #gameOverScreen {
+  position:absolute; inset:0; background:rgba(0,0,0,0.8); display:flex; flex-direction:column;
+  align-items:center; justify-content:center; color:#fff; text-align:center; pointer-events:auto;
+}
+.hidden { display:none !important; }
+
+.card {
+  background: #222; border:2px solid #ffcc00; border-radius:16px; padding:30px;
+  width:90%; max-width:360px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+h1 { font-size:32px; color:#ffcc00; margin-bottom:10px; text-shadow: 2px 2px 0 #b33000; }
+p { font-size:14px; color:#ccc; margin-bottom:20px; }
+.btn-action {
+  background: linear-gradient(180deg, #ffcc00, #ff9900); color:#000; border:none;
+  padding:14px 28px; font-size:18px; font-weight:800; border-radius:8px; cursor:pointer; width:100%;
+  box-shadow: 0 4px 0 #b36b00; transition: transform 0.1s;
+}
+.btn-action:active { transform: translateY(4px); box-shadow: 0 0px 0 #b36b00; }
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<div id="ui">
+  <div class="hud">
+    <div class="score">⚡ DISTÂNCIA: <span id="scoreVal">0</span>m</div>
+    <div class="coins">🪙 MOEDAS: <span id="coinsVal">0</span></div>
+  </div>
+
+  <!-- Tela de Menu -->
+  <div id="menuScreen">
+    <div class="card">
+      <h1>ON THE RUN</h1>
+      <p>Desvie dos carros pretos e colete as moedas amarelas!</p>
+      <p style="font-size:12px; color:#aaa;">Controles: Setas ⬅️ ➡️ ou Toque nas laterais da tela</p>
+      <button class="btn-action btn" id="startBtn">CORRER!</button>
+    </div>
+  </div>
+
+  <!-- Tela de Fim de Jogo -->
+  <div id="gameOverScreen" class="hidden">
+    <div class="card">
+      <h1 style="color:#ff3333;">BATEU! 💥</h1>
+      <p>Sua corrida terminou.</p>
+      <div style="margin-bottom:20px; font-size:18px;">
+        <div>Pontos: <span id="finalScore">0</span>m</div>
+      </div>
+      <button class="btn-action btn" id="restartBtn">TENTAR DE NOVO</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// Configurações do Jogo
+let gameRunning = false;
+let gameOver = false;
+let score = 0;
+let coins = 0;
+let speed = 8;
+const maxSpeed = 20;
+
+// Configuração de Pista (Efeito Pseudo-3D Simples de perspectiva)
+let horizon = 0; 
+let roadW = 0;
+let roadX = 0;
+
+// Jogador (Carro Amarelo)
+let player = {
+  lane: 1, // 0: Esquerda, 1: Centro, 2: Direita
+  targetX: 0,
+  currentX: 0,
+  y: 0,
+  w: 65,
+  h: 40
+};
+
+// Obstáculos e Moedas
+let entities = [];
+let spawnTimer = 0;
+
+function resize() {
+  canvas.width = Math.min(window.innerWidth, 480);
+  canvas.height = window.innerHeight;
+  
+  horizon = canvas.height * 0.45; // Linha do horizonte
+  roadW = canvas.width * 0.85;    // Largura da base da pista
+  roadX = canvas.width / 2;       // Centro da pista
+  
+  player.y = canvas.height - 110;
+  updatePlayerLaneImmediate();
+}
+
+function updatePlayerLaneImmediate() {
+  let lanesX = [canvas.width * 0.22, canvas.width * 0.5, canvas.width * 0.78];
+  player.targetX = lanesX[player.lane];
+  player.currentX = player.targetX;
+}
+
+window.addEventListener('resize', resize);
+
+// Controles Teclado
+window.addEventListener('keydown', (e) => {
+  if (!gameRunning || gameOver) return;
+  if (e.key === 'ArrowLeft' && player.lane > 0) player.lane--;
+  if (e.key === 'ArrowRight' && player.lane < 2) player.lane++;
+});
+
+// Controles Toque (Mobile)
+window.addEventListener('touchstart', (e) => {
+  if (e.target.classList.contains('btn') || e.target.closest('.btn')) return;
+  if (!gameRunning || gameOver) return;
+  
+  let touchX = e.touches[0].clientX;
+  if (touchX < window.innerWidth / 2 && player.lane > 0) {
+    player.lane--;
+  } else if (touchX >= window.innerWidth / 2 && player.lane < 2) {
+    player.lane++;
+  }
+});
+
+function spawnEntity() {
+  let isCoin = Math.random() < 0.4; // 40% chance de ser moeda, 60% carro
+  let randomLane = Math.floor(Math.random() * 3);
+  
+  entities.push({
+    lane: randomLane,
+    z: 0, // Progresso do horizonte (0) até a tela (1)
+    type: isCoin ? 'coin' : 'car',
+    speed: isCoin ? 0 : (Math.random() * 0.002 + 0.002), // Carros se movem um pouco
+    color: isCoin ? '#ffd700' : '#333'
+  });
+}
+
+function resetGame() {
+  score = 0;
+  coins = 0;
+  speed = 8;
+  entities = [];
+  player.lane = 1;
+  updatePlayerLaneImmediate();
+  gameOver = false;
+  document.getElementById('scoreVal').innerText = score;
+  document.getElementById('coinsVal').innerText = coins;
+}
+
+function update() {
+  if (!gameRunning || gameOver) return;
+
+  // Aumenta pontuação e velocidade progressivamente
+  score += Math.floor(speed / 5);
+  document.getElementById('scoreVal').innerText = score;
+  if (speed < maxSpeed) speed += 0.002;
+
+  // Interpolação suave para o movimento lateral do jogador
+  let lanesX = [canvas.width * 0.22, canvas.width * 0.5, canvas.width * 0.78];
+  player.targetX = lanesX[player.lane];
+  player.currentX += (player.targetX - player.currentX) * 0.25;
+
+  // Spawn de objetos
+  spawnTimer += speed;
+  if (spawnTimer > 350) {
+    spawnEntity();
+    spawnTimer = 0;
+  }
+
+  // Atualiza objetos
+  for (let i = entities.length - 1; i >= 0; i--) {
+    let ent = entities[i];
+    
+    // O objeto avança em direção à tela com base na velocidade atual do jogo
+    ent.z += (speed * 0.0015) - ent.speed;
+    
+    // Se chegou na base da tela (passou do jogador)
+    if (ent.z >= 1.0) {
+      entities.splice(i, 1);
+      continue;
+    }
+
+    // Checagem de Colisão aproximada quando o objeto chega perto do jogador (z entre 0.8 e 0.95)
+    if (ent.z > 0.82 && ent.z < 0.95 && ent.lane === player.lane) {
+      if (ent.type === 'coin') {
+        coins += 5;
+        document.getElementById('coinsVal').innerText = coins;
+        entities.splice(i, 1); // Remove a moeda coletada
+      } else {
+        // Bateu no carro
+        gameOver = true;
+        gameRunning = false;
+        document.getElementById('finalScore').innerText = score;
+        document.getElementById('gameOverScreen').classList.remove('hidden');
+      }
+    }
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // 1. Desenha o Céu e a Cidade de Fundo
+  ctx.fillStyle = '#4facfe';
+  ctx.fillRect(0, 0, canvas.width, horizon);
+  
+  // Prédios simples no fundo
+  ctx.fillStyle = '#2b3a4a';
+  for(let i = 0; i < canvas.width; i += 40) {
+    let h = 60 + Math.sin(i) * 30;
+    ctx.fillRect(i, horizon - h, 35, h);
+  }
+
+  // 2. Desenha o Chão/Grama lateral
+  ctx.fillStyle = '#137a13';
+  ctx.fillRect(0, horizon, canvas.width, canvas.height - horizon);
+
+  // 3. Desenha a Pista 2.5D (Perspectiva Trapezoidal)
+  ctx.fillStyle = '#444'; // Cor do asfalto
+  ctx.beginPath();
+  ctx.moveTo(roadX - 20, horizon);
+  ctx.lineTo(roadX + 20, horizon);
+  ctx.lineTo(roadX + roadW/2, canvas.height);
+  ctx.lineTo(roadX - roadW/2, canvas.height);
+  ctx.closePath();
+  ctx.fill();
+
+  // Linhas laterais da pista (faixas brancas)
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(roadX - 20, horizon); ctx.lineTo(roadX - roadW/2, canvas.height);
+  ctx.moveTo(roadX + 20, horizon); ctx.lineTo(roadX + roadW/2, canvas.height);
+  ctx.stroke();
+
+  // 4. Desenha Elementos na Pista (Moedas e Outros Carros)
+  // Ordena por 'z' para desenhar os mais distantes primeiro (pintura em camadas)
+  entities.sort((a,b) => a.z - b.z);
+
+  entities.forEach(ent => {
+    // Cálculo de perspectiva matemática
+    let sizeFactor = ent.z; // Fica maior conforme se aproxima da tela (z aproxima de 1)
+    let currentY = horizon + (canvas.height - horizon) * ent.z;
+    
+    // Calcular o X da pista baseado na linha e na perspectiva atual
+    let currentRoadW = roadW * ent.z;
+    let startX = roadX - currentRoadW / 2;
+    let laneWidth = currentRoadW / 3;
+    let currentX = startX + laneWidth * ent.lane + laneWidth / 2;
+
+    let w = 70 * sizeFactor;
+    let h = 45 * sizeFactor;
+
+    if (ent.type === 'coin') {
+      // Desenhar Moeda Animada
+      ctx.save();
+      ctx.fillStyle = ent.color;
+      ctx.beginPath();
+      ctx.arc(currentX, currentY - h/2, (w/2.5), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      // Desenhar Outros Carros (Inimigos)
+      ctx.fillStyle = ent.color;
+      ctx.fillRect(currentX - w/2, currentY - h, w, h);
+      
+      // Vidro traseiro e lanternas para dar sensação de traseira
+      ctx.fillStyle = '#88ccff';
+      ctx.fillRect(currentX - w/3, currentY - h + 5*sizeFactor, (w*2/3), h/3);
+      ctx.fillStyle = '#ff3333'; // Lanternas vermelhas
+      ctx.fillRect(currentX - w/2 + 2, currentY - 10*sizeFactor, 8*sizeFactor, 4*sizeFactor);
+      ctx.fillRect(currentX + w/2 - 2 - 8*sizeFactor, currentY - 10*sizeFactor, 8*sizeFactor, 4*sizeFactor);
+    }
+  });
+
+  // 5. Desenha o Carro do Jogador (Amarelo)
+  ctx.save();
+  let pW = player.w;
+  let pH = player.h;
+  // Sombra do carro
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillRect(player.currentX - pW/2 + 5, player.y + pH - 5, pW, 10);
+  
+  // Corpo do Carro Amarelo (Estilo o do On The Run)
+  ctx.fillStyle = '#ffcc00'; 
+  ctx.fillRect(player.currentX - pW/2, player.y, pW, pH);
+  
+  // Detalhes do vidro traseiro (você vê o carro por trás)
+  ctx.fillStyle = '#222';
+  ctx.fillRect(player.currentX - pW/3, player.y + 5, (pW * 2/3), pH / 2.5);
+  
+  // Rodas
+  ctx.fillStyle = '#111';
+  ctx.fillRect(player.currentX - pW/2 - 2, player.y + pH - 15, 4, 12);
+  ctx.fillRect(player.currentX + pW/2 - 2, player.y + pH - 15, 4, 12);
+  
+  // Faróis Traseiros acesos
+  ctx.fillStyle = '#ff0000';
+  ctx.fillRect(player.currentX - pW/2 + 4, player.y + pH - 12, 10, 5);
+  ctx.fillRect(player.currentX + pW/2 - 14, player.y + pH - 12, 10, 5);
+  ctx.restore();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// Inicialização de botões da UI
+document.getElementById('startBtn').onclick = () => {
+  document.getElementById('menuScreen').classList.add('hidden');
+  gameRunning = true;
+  resetGame();
+};
+
+document.getElementById('restartBtn').onclick = () => {
+  document.getElementById('gameOverScreen').classList.add('hidden');
+  gameRunning = true;
+  resetGame();
+};
+
+// Start do Engine
+resize();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
